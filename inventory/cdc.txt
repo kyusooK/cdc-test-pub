@@ -1,0 +1,182 @@
+## Contract Test 
+
+주문서비스와 상품서비스간 계약(Contract)테스트를 통해 마이크로서비스와 같은 분산 환경에서 API 일관성이 유지되는 실습을 수행한다.  
+
+### 작업 순서
+- 먼저, GitPod 환경을 로딩한다. (Code > ProjectIDE 클릭)
+
+- 오른쪽 모델을 FORK 후, 편집한다.
+
+#### inventory 서비스의 Examples 생성
+- given-when-then 패턴에 맞게 예제를 만들기위해 다음과 같이 진행한다.
+1. 'decreasestock' Command 스티커를 생성 한다.
+2. 'Extend Verb URI' 선택 > Method > PUT 선택, Request Body에 아래와 같이 id와 qty를 추가한다.
+![image](https://github.com/kyusooK/lab-shop-microcks/assets/123912988/71e9b147-3b02-4157-bcaf-6ac606afb696)
+3. 생성한 Command 스티커를 Inventory Aggregate스티커 왼쪽에 부착한다.
+4. 시나리오의 흐름에 맞게 OrderPlaced - decreasestock -> StockDecreased의 Relation을 아래와 같이 연결한다.
+![image](https://github.com/kyusooK/lab-shop-microcks/assets/123912988/f9ee56fa-5eb0-449f-bd87-da2945e8ae53)
+5. decreasestock 스티커를 더블 클릭한 후, EXAMPLES를 클릭한다.
+6. 시나리오를 토대로 decreasestock(Given)의 qty에 의해 Inventory(When)에 설정한 stock이 감소되어 StockDecreased(Then)이벤트가 발행될 때, 감소된 stock이 나오는 예제를 아래와 같이 생성한다.
+![image](https://github.com/kyusooK/lab-shop-microcks/assets/123912988/ee5e615e-7c16-4a5e-af4e-8672dde411a8)
+
+#### CDC Test 토핑 적용하기
+
+- Code > Code Preview를 클릭 > 우측 상단 Toppings > Marketplace를 클릭하여 Marketplace화면으로 접근한다.
+- 상단의  'TOPPINGS' > 'CDC-TEST' > Apply 클릭을 통해 토핑을 적용한다.
+
+### 서비스 기동
+
+- 주문서비스(8081)를 기동한다.
+```	
+cd order
+mvn spring-boot:run
+```
+
+- 새로운 터미널을 열어 상품서비스(8085)를 기동한다.
+```
+cd inventory
+mvn spring-boot:run
+```
+
+- 실행된 주문 서비스에 주문을 생성한다.
+```	
+http http://localhost:8081/orders productId=2 quantity=3 customerId=1@uengine.org
+```
+
+#### 상품팀의 일방적 API 수정으로 오류상황 연출하기
+
+- 주문서비스에서 주문을 할때, 상품서비스의 api 를 호출하고 있다.
+  - Order.java 파일(45행)의 restTemplate.getForEntity 확인
+  - 프로세스에 필요한 아래 웹 URL을 호출한다. 
+  - http://상품서비스 URL/product/[productId]
+
+- 이때, 상품서비스에서 참조되는 리소스의 해당 api 를 다른 이름으로('item') 임의 수정한다.
+  - 상품서비스의 해당 리소스명 : ProductController.java 
+  - 16행에서 @GetMapping("/product/{productId}") 을, @GetMapping("/item/{productId}") 으로 변경
+
+- 상품서비스를 재시작 하고
+```
+상품서비스 Console 화면에서 ^C
+mvn spring-boot:run
+```
+
+- 다시 주문해 본다.
+```
+http http://localhost:8081/orders productId=2 quantity=3 customerId=1@uengine.org
+```
+
+- 주문팀에서 필요한 API가 소실되어 콘솔상에 404오류가 발생한다.
+
+
+### 일방적 API 수정을 방지하기 위한 계약 체결
+
+- Consumer가 참조하는 코드를 Provider의 일방적인 수정방지를 위해 Contract 적용
+- Consumer인 주문 서비스 주도적으로 계약서(Consumer Driven Contract)를 작성한다.
+- 작성한 계약서는 주문서비스 최상위 root에 존재(productGet.groovy) 한다.
+``` groovy
+package contracts.rest
+
+Contract.make {
+    request {
+        method 'GET'
+        url ('/product/1')
+        headers {
+            contentType(applicationJson())
+        }
+    }
+    response {
+        status 200
+        body(
+                id: 1,
+                name: "TV",
+                price: 10000,
+                stock: 10,
+                imageUrl: "testUrl"
+        )
+        bodyMatchers {
+            jsonPath('$.id', byRegex(nonEmpty()).asLong())
+            jsonPath('$.name', byRegex(nonEmpty()).asString())
+            jsonPath('$.price', byRegex(nonEmpty()).asLong())
+            jsonPath('$.stock', byRegex(nonEmpty()).asLong())
+            jsonPath('$.imageUrl', byRegex(nonEmpty()).asString())
+        }
+        headers {
+            contentType(applicationJson())
+        }
+    }
+}
+```
+- productGet.groovy 파일을 복사해, inventory 서비스의 test/resources/contracts/rest 폴더에 복사를 한다.
+> - Git 환경에서 PR(Pull Request)을 요청하고 이를 상품팀이 수락한다.
+> - (contracts/rest 폴더는 새로 생성한다.)
+> - (contracts/rest 폴더를 만드는 이유는 productGet.groovy 파일에 package contracts.rest 라고 선언했기 때문이다.)
+
+
+### 계약 체결 후 배포를 위한 빌드 실행
+
+- 계약에 의해서 product 서비스에서는 빌드단계에서 에러가 발생한다.
+- 상품서비스를 종료하고, 다시 배포를 위한 빌드를 실행한다.
+```
+상품서비스 Console 화면에서 ^C
+mvn clean package
+``` 
+- test fail 에러 발생!!
+![image](https://user-images.githubusercontent.com/35618409/231977809-da0f6a45-0e9f-4de2-b325-c812ae65a032.png)
+
+> Consumer와 체결한 계약(Contract)을 위반하여 상품팀에서는 빌드단계에서부터 실패하게 된다. 
+> 계약서에 명시된 응답 속성이 하나라도 리턴되지 않아도 빌드는 실패한다. 
+
+- 계약 위반을 해결하기 위하여 product 서비스는 기존의 /product 라는 api 를 유지 해야한다.
+-  product 서비스의 ProductController.java 에서 
+
+```
+   @GetMapping("/v2/item/{productId}")
+    Product productStockCheck_v2(@PathVariable(value = "productId") Long productId) {
+        return productStockCheck(productId);
+    }
+
+    @GetMapping("/product/{productId}")
+    Product productStockCheck(@PathVariable(value = "productId") Long productId) {
+
+        return  this.productService.getProductById(productId);
+    }
+
+
+```
+위의 같이 기존 API를 준수하면서 신규 API가 추가될 수 있도록 코드를 수정한다.
+
+- product 서비스의 package 명령을 다시 호출해 본다.
+```
+cd inventory
+mvn clean package
+```
+- 테스트 성공 및 jar 파일 생성 완료!!
+
+
+### Provder 계약테스트 후, Consumer 테스트 실행
+
+- 주문서비스는 상품서비스에서 정상적으로 테스트를 적용하여 배포중인지 테스트를 할 수 있다.
+- 주문서비스가 상품서비스의 api 를 테스트 하기 위해서는 상품서비스에서 stub 파일을 제공해 주어야 한다.
+- 상품 서비스에서 mvn install 을 하여 stub 파일을 Local(.m2 folder)이나 Remote(mvn deploy) 리파지토리에 저장한다.
+```
+cd inventory
+mvn install
+```
+
+- 주문서비스에서는 상품서비스에서 만들어진 stub 파일(Mock Server)을 바라보며 테스트를 진행한다.
+- order 서비스의 test/java/com.example.template/ProductContractTest.java 파일 참고
+  - 생성된 Stub을 로컬에서 Mock서버로 8090포트로 실행한다. (@AutoConfigureStubRunner)
+- @Test Code는
+	- OrderController에 등록된 /order/validateProduct/1 URL을 호출하고,
+	- OrderController에서는 Local Mock 서버로 "http://localhost:8090/product/" + productId 로 Get 요청을 보낸다.
+	- 이처럼 주문서비스의 Biz 로직을 활용해 배포 시, 상품서비스 Stub을 통해 참조하는 API 테스트를 수행한다.
+	- (Test 시엔 Stub URL을, 클라우드 환경에서는 Cloud URL을 profile로 관리)
+```
+cd order
+mvn clean test
+```	
+- Test 로그를 보면, Mock Server에 대해 Request와 Response가 성공적으로 실행되었고,
+![image](https://user-images.githubusercontent.com/35618409/232052587-c8136327-8fdb-4e78-84e1-6c6833b2a852.png)
+
+- 전체 Contract 테스트도 성공적으로 종료되었다.
+![image](https://user-images.githubusercontent.com/35618409/232053136-6e875302-a95f-48c0-a444-2c0b2ea8da0d.png)
